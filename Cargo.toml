@@ -1,4 +1,6 @@
 [package]
+description = "ternary-knn - SuperInstance ecosystem crate"
+repository = "https://github.com/SuperInstance/ternary-knn"
 name = "ternary-knn"
 version = "0.1.0"
 edition = "2024"
