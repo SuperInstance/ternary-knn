@@ -1,8 +1,8 @@
 //! # ternary-knn
 //!
-//! K-nearest neighbors classification and regression for ternary vectors
-//! (elements in {-1, 0, +1}), with ternary-specific distance metrics and
-//! both brute-force and ball-tree index strategies.
+//! K-nearest neighbors **classification** for ternary vectors
+//! (elements in {-1, 0, +1}), using a ternary-specific distance metric and
+//! brute-force neighbor search.
 //!
 //! Connected to the [`ternary-types`](https://github.com/SuperInstance/ternary-types)
 //! fleet via its dependency — use `ternary_types::Ternary` for cross-crate interop.
@@ -33,11 +33,7 @@ pub fn validate_ternary(vec: &[Trit]) -> Result<(), String> {
 /// Hamming-like trit distance: count positions where trits differ.
 pub fn trit_distance(a: &[Trit], b: &[Trit]) -> Result<f64, String> {
     if a.len() != b.len() {
-        return Err(format!(
-            "Dimension mismatch: {} vs {}",
-            a.len(),
-            b.len()
-        ));
+        return Err(format!("Dimension mismatch: {} vs {}", a.len(), b.len()));
     }
 
     let mut total = 0.0;
@@ -130,17 +126,37 @@ impl KNNClassifier {
     }
 
     /// Predict label for a single point.
+    ///
+    /// Returns the majority label among the `k` nearest neighbors (by trit
+    /// distance). On a **voting tie** (two labels with equal vote counts), the
+    /// **smallest label wins**, making the result deterministic regardless of
+    /// map iteration order. Distance ties are broken by dataset order (stable
+    /// sort). `k` larger than the dataset is clamped to the dataset size.
     pub fn predict(&self, point: &[Trit]) -> Result<i32, String> {
         let data = self.data.as_ref().ok_or("KNN not fitted yet")?;
         validate_ternary(point)?;
 
+        // Validate the query dimension up front so a bad-length query returns a
+        // clean error instead of panicking inside `trit_distance(...).unwrap()`.
+        if point.len() != data.dim {
+            return Err(format!(
+                "Dimension mismatch: query has {} dims but dataset has {}",
+                point.len(),
+                data.dim
+            ));
+        }
+
+        // Dimensions are now guaranteed equal, but propagate any error rather
+        // than `.unwrap()` so the code is robust to metric changes.
         let mut distances: Vec<(f64, i32)> = data
             .points
             .iter()
-            .map(|p| (trit_distance(&p.features, point).unwrap(), p.label))
-            .collect();
+            .map(|p| Ok((trit_distance(&p.features, point)?, p.label)))
+            .collect::<Result<Vec<_>, String>>()?;
 
-        distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        // Use `total_cmp` (not `partial_cmp().unwrap()`) so the sort can never
+        // panic on a NaN distance, even if a future metric returns one.
+        distances.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         let k_nearest = &distances[..self.k.min(distances.len())];
         let mut votes: HashMap<i32, usize> = HashMap::new();
@@ -148,11 +164,18 @@ impl KNNClassifier {
             *votes.entry(label).or_insert(0) += 1;
         }
 
-        votes
+        // Majority vote. Pick the highest count, then break ties by choosing
+        // the smallest label so the result is deterministic regardless of
+        // HashMap iteration order.
+        let best_count = votes.values().copied().max().unwrap_or(0);
+        let winner = votes
             .into_iter()
-            .max_by_key(|&(_, count)| count)
+            .filter(|&(_, count)| count == best_count)
             .map(|(label, _)| label)
-            .ok_or("No predictions available".into())
+            .min()
+            .ok_or_else(|| "No predictions available".to_string())?;
+
+        Ok(winner)
     }
 
     /// Predict labels for multiple points.
@@ -239,11 +262,92 @@ mod tests {
         assert!(TernaryDataset::new(vec![
             DataPoint::new(vec![1, 0], 0),
             DataPoint::new(vec![1, 0, -1], 1),
-        ]).is_err());
+        ])
+        .is_err());
     }
 
     #[test]
     fn test_empty_dataset_error() {
         assert!(TernaryDataset::new(vec![]).is_err());
+    }
+
+    #[test]
+    fn test_k_larger_than_dataset() {
+        // k=10 but only 3 points; k must clamp to dataset size.
+        // query [1,1]: dist to [1,1]=0, [1,0]=1, [-1,-1]=4.
+        // k clamped to 3 -> votes label5=2, label9=1 -> predict 5.
+        let points = vec![
+            DataPoint::new(vec![1, 1], 5),
+            DataPoint::new(vec![1, 0], 5),
+            DataPoint::new(vec![-1, -1], 9),
+        ];
+        let dataset = TernaryDataset::new(points).unwrap();
+        let mut knn = KNNClassifier::new(10);
+        knn.fit(dataset);
+        assert_eq!(knn.predict(&[1, 1]).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_predict_dimension_mismatch_returns_error() {
+        // A query whose length differs from the dataset must return a clean
+        // error rather than panicking inside trit_distance(...).unwrap().
+        let dataset = TernaryDataset::new(vec![
+            DataPoint::new(vec![1, 1], 0),
+            DataPoint::new(vec![-1, -1], 1),
+        ])
+        .unwrap();
+        let mut knn = KNNClassifier::new(1);
+        knn.fit(dataset);
+        assert!(knn.predict(&[1, 1, 1]).is_err());
+    }
+
+    #[test]
+    fn test_predict_not_fitted() {
+        let knn = KNNClassifier::new(1);
+        assert!(knn.predict(&[1, 0]).is_err());
+    }
+
+    #[test]
+    fn test_voting_tie_smallest_label_wins() {
+        // Two points equidistant from the query with distinct labels 0 and 2.
+        // With k=2 the vote is tied (1 each); the smallest label must win.
+        let points = vec![DataPoint::new(vec![1, 0], 0), DataPoint::new(vec![0, 1], 2)];
+        let dataset = TernaryDataset::new(points).unwrap();
+        let mut knn = KNNClassifier::new(2);
+        knn.fit(dataset);
+        assert_eq!(knn.predict(&[0, 0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_all_identical_points() {
+        // Degenerate case: every point has identical features and label.
+        let points = vec![
+            DataPoint::new(vec![0, 0, 0], 7),
+            DataPoint::new(vec![0, 0, 0], 7),
+            DataPoint::new(vec![0, 0, 0], 7),
+        ];
+        let dataset = TernaryDataset::new(points).unwrap();
+        let mut knn = KNNClassifier::new(3);
+        knn.fit(dataset);
+        assert_eq!(knn.predict(&[0, 0, 0]).unwrap(), 7);
+    }
+
+    #[test]
+    fn test_normalized_distance_nonzero() {
+        // [1,0,-1] vs [-1,0,1]: raw = 2 + 0 + 2 = 4; normalized = 4/(2*3).
+        let a = vec![1, 0, -1];
+        let b = vec![-1, 0, 1];
+        assert_eq!(normalized_trit_distance(&a, &b).unwrap(), 4.0 / 6.0);
+    }
+
+    #[test]
+    fn test_trit_distance_dimension_mismatch() {
+        assert!(trit_distance(&[1, 0], &[1, 0, -1]).is_err());
+    }
+
+    #[test]
+    fn test_validate_ternary_rejects_invalid() {
+        assert!(validate_ternary(&[1, 0, 2, -1]).is_err());
+        assert!(validate_ternary(&[1, 0, -1]).is_ok());
     }
 }
