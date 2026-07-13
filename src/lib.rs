@@ -33,11 +33,7 @@ pub fn validate_ternary(vec: &[Trit]) -> Result<(), String> {
 /// Hamming-like trit distance: count positions where trits differ.
 pub fn trit_distance(a: &[Trit], b: &[Trit]) -> Result<f64, String> {
     if a.len() != b.len() {
-        return Err(format!(
-            "Dimension mismatch: {} vs {}",
-            a.len(),
-            b.len()
-        ));
+        return Err(format!("Dimension mismatch: {} vs {}", a.len(), b.len()));
     }
 
     let mut total = 0.0;
@@ -266,7 +262,8 @@ mod tests {
         assert!(TernaryDataset::new(vec![
             DataPoint::new(vec![1, 0], 0),
             DataPoint::new(vec![1, 0, -1], 1),
-        ]).is_err());
+        ])
+        .is_err());
     }
 
     #[test]
@@ -314,10 +311,7 @@ mod tests {
     fn test_voting_tie_smallest_label_wins() {
         // Two points equidistant from the query with distinct labels 0 and 2.
         // With k=2 the vote is tied (1 each); the smallest label must win.
-        let points = vec![
-            DataPoint::new(vec![1, 0], 0),
-            DataPoint::new(vec![0, 1], 2),
-        ];
+        let points = vec![DataPoint::new(vec![1, 0], 0), DataPoint::new(vec![0, 1], 2)];
         let dataset = TernaryDataset::new(points).unwrap();
         let mut knn = KNNClassifier::new(2);
         knn.fit(dataset);
