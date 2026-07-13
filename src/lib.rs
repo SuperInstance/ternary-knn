@@ -273,4 +273,87 @@ mod tests {
     fn test_empty_dataset_error() {
         assert!(TernaryDataset::new(vec![]).is_err());
     }
+
+    #[test]
+    fn test_k_larger_than_dataset() {
+        // k=10 but only 3 points; k must clamp to dataset size.
+        // query [1,1]: dist to [1,1]=0, [1,0]=1, [-1,-1]=4.
+        // k clamped to 3 -> votes label5=2, label9=1 -> predict 5.
+        let points = vec![
+            DataPoint::new(vec![1, 1], 5),
+            DataPoint::new(vec![1, 0], 5),
+            DataPoint::new(vec![-1, -1], 9),
+        ];
+        let dataset = TernaryDataset::new(points).unwrap();
+        let mut knn = KNNClassifier::new(10);
+        knn.fit(dataset);
+        assert_eq!(knn.predict(&[1, 1]).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_predict_dimension_mismatch_returns_error() {
+        // A query whose length differs from the dataset must return a clean
+        // error rather than panicking inside trit_distance(...).unwrap().
+        let dataset = TernaryDataset::new(vec![
+            DataPoint::new(vec![1, 1], 0),
+            DataPoint::new(vec![-1, -1], 1),
+        ])
+        .unwrap();
+        let mut knn = KNNClassifier::new(1);
+        knn.fit(dataset);
+        assert!(knn.predict(&[1, 1, 1]).is_err());
+    }
+
+    #[test]
+    fn test_predict_not_fitted() {
+        let knn = KNNClassifier::new(1);
+        assert!(knn.predict(&[1, 0]).is_err());
+    }
+
+    #[test]
+    fn test_voting_tie_smallest_label_wins() {
+        // Two points equidistant from the query with distinct labels 0 and 2.
+        // With k=2 the vote is tied (1 each); the smallest label must win.
+        let points = vec![
+            DataPoint::new(vec![1, 0], 0),
+            DataPoint::new(vec![0, 1], 2),
+        ];
+        let dataset = TernaryDataset::new(points).unwrap();
+        let mut knn = KNNClassifier::new(2);
+        knn.fit(dataset);
+        assert_eq!(knn.predict(&[0, 0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_all_identical_points() {
+        // Degenerate case: every point has identical features and label.
+        let points = vec![
+            DataPoint::new(vec![0, 0, 0], 7),
+            DataPoint::new(vec![0, 0, 0], 7),
+            DataPoint::new(vec![0, 0, 0], 7),
+        ];
+        let dataset = TernaryDataset::new(points).unwrap();
+        let mut knn = KNNClassifier::new(3);
+        knn.fit(dataset);
+        assert_eq!(knn.predict(&[0, 0, 0]).unwrap(), 7);
+    }
+
+    #[test]
+    fn test_normalized_distance_nonzero() {
+        // [1,0,-1] vs [-1,0,1]: raw = 2 + 0 + 2 = 4; normalized = 4/(2*3).
+        let a = vec![1, 0, -1];
+        let b = vec![-1, 0, 1];
+        assert_eq!(normalized_trit_distance(&a, &b).unwrap(), 4.0 / 6.0);
+    }
+
+    #[test]
+    fn test_trit_distance_dimension_mismatch() {
+        assert!(trit_distance(&[1, 0], &[1, 0, -1]).is_err());
+    }
+
+    #[test]
+    fn test_validate_ternary_rejects_invalid() {
+        assert!(validate_ternary(&[1, 0, 2, -1]).is_err());
+        assert!(validate_ternary(&[1, 0, -1]).is_ok());
+    }
 }
