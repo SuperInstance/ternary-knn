@@ -1,6 +1,6 @@
 # ternary-knn
 
-K-nearest neighbors for ternary vector spaces {-1, 0, +1} — with a custom distance metric, ball-tree indexing, and both classification and regression.
+K-nearest neighbors **classification** for ternary vector spaces {-1, 0, +1}, using a ternary-specific distance metric and brute-force neighbor search.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -22,145 +22,133 @@ Ternary distance has three levels, not two. In binary space, two bits either mat
 
 This three-level metric captures *structural* disagreement that Hamming distance can't. A zero-vs-nonzero mismatch is a soft disagreement; a +1-vs-−1 mismatch is a hard contradiction. That distinction matters when you're classifying quantized patterns.
 
+Trit distance is a **proper metric**: it is non-negative, symmetric, identity-of-indiscernibles holds, and the triangle inequality is satisfied (the worst case is `+1 → 0 → -1`, where `d(+1,-1) = 2 = 1 + 1`).
+
 ## Quick Start
 
 ```rust
-use ternary_knn::{KnnClassifier, KnnRegressor, BallTree, trit_distance, brute_force_knn};
+use ternary_knn::{validate_ternary, DataPoint, KNNClassifier, TernaryDataset};
 
-// ── Classification ──
-let mut knn = KnnClassifier::new(3);  // k = 3 neighbors
-knn.add(vec![1, 1, 1], 0.0).unwrap();    // class 0: positive region
-knn.add(vec![-1, -1, -1], 1.0).unwrap(); // class 1: negative region
-knn.add(vec![0, 0, 0], 0.0).unwrap();    // class 0: neutral
+// Build a labeled dataset of ternary vectors. Labels are i32.
+let dataset = TernaryDataset::new(vec![
+    DataPoint::new(vec![1, 1, 1], 1),
+    DataPoint::new(vec![1, 1, -1], 1),
+    DataPoint::new(vec![-1, -1, -1], 0),
+    DataPoint::new(vec![-1, -1, 1], 0),
+])
+.unwrap();
 
-let label = knn.predict(&[1, 1, 0]).unwrap(); // → 0.0 (closer to positive)
+// k = 3 neighbors, brute-force search.
+let mut knn = KNNClassifier::new(3);
+knn.fit(dataset);
 
-// ── Weighted voting (inverse-distance weighting) ──
-let knn_w = KnnClassifier::new(5).with_weighted(true);
+// Classify query points (must match the dataset dimension).
+assert_eq!(knn.predict(&[1, 1, 0]).unwrap(), 1);   // closer to the +1 cluster
+assert_eq!(knn.predict(&[-1, -1, 0]).unwrap(), 0); // closer to the -1 cluster
 
-// ── Regression ──
-let mut reg = KnnRegressor::new(3);
-reg.add(vec![1, 0, 0], 10.0).unwrap();
-reg.add(vec![-1, 0, 0], 20.0).unwrap();
-reg.add(vec![0, 1, 0], 15.0).unwrap();
-let value = reg.predict(&[1, 0, 0]).unwrap(); // ≈ 10.0 (exact match dominates)
+// Batch prediction over several queries.
+let labels = knn
+    .predict_batch(&[vec![1, 1, 0], vec![-1, -1, 0]])
+    .unwrap();
+assert_eq!(labels, vec![1, 0]);
 
-// ── Ball tree for fast queries on large datasets ──
-let data = vec![
-    vec![1, 1, 1, 0], vec![-1, -1, -1, 0],
-    vec![1, 0, -1, 1], vec![0, 0, 0, 0],
-];
-let tree = BallTree::build(data.clone()).unwrap();
-let neighbors = tree.query(&[1, 0, 0, 0], 2).unwrap();
-// → [(index, distance), ...]
+// Report accuracy against a labeled test set.
+// assert_eq!(knn.accuracy(&test_set).unwrap(), 0.95);
 ```
 
-## Architecture
+## How prediction works
 
-```
-                    ┌─────────────────────────────┐
-  Training data ──→ │   BallTree (spatial index)   │
-  [Vec<Trit>]       │   Recursive median splits    │
-                    │   Leaf size: 8 points         │
-                    └──────────────┬────────────────┘
-                                   │ query(query, k)
-                                   ▼
-                    ┌─────────────────────────────┐
-                    │   KnnClassifier              │
-                    │   - majority vote            │
-                    │   - weighted vote (1/dist)   │
-                    │   - tie-break: smallest label│
-                    ├─────────────────────────────┤
-                    │   KnnRegressor               │
-                    │   - inverse-distance average │
-                    │   - exact match: inf weight  │
-                    └─────────────────────────────┘
+1. **Distance** — for every training point, compute `trit_distance(query, point)`.
+2. **Sort** — order points by ascending distance (stable; NaN-safe via `f64::total_cmp`).
+3. **Select** — take the `k` nearest. `k` larger than the dataset is clamped to the dataset size.
+4. **Vote** — majority label among those `k` neighbors wins.
 
-  Brute-force baseline: O(n·d) per query, no index
-```
-
-The ball tree splits along the dimension with the greatest spread, using median partitions. Centroids are rounded to the nearest trit. Pruning skips subtrees whose minimum possible distance exceeds the current k-th best.
+**Tie-breaking is deterministic:**
+- *Distance ties* are broken by dataset order (the sort is stable).
+- *Voting ties* (two labels with equal vote counts) are resolved by the **smallest label** winning.
 
 ## API Reference
 
-### Distance Functions
+### Distance & validation functions
 
 ```rust
-fn trit_distance(a: &[Trit], b: &[Trit]) -> Result<f64, String>
-fn weighted_trit_distance(a: &[Trit], b: &[Trit], weights: &[f64]) -> Result<f64, String>
-fn validate_ternary(vec: &[Trit]) -> Result<(), String>
+type Trit = i8;
+
+fn validate_ternary(vec: &[Trit]) -> Result<(), String>;
+fn trit_distance(a: &[Trit], b: &[Trit]) -> Result<f64, String>;
+fn normalized_trit_distance(a: &[Trit], b: &[Trit]) -> Result<f64, String>;
 ```
 
-### KnnClassifier
+`normalized_trit_distance` divides the raw trit distance by `2 * dims`, mapping it to `[0, 1]`.
+
+### `DataPoint` / `TernaryDataset`
 
 ```rust
-let mut clf = KnnClassifier::new(k: usize);
-clf.with_weighted(true);               // enable inverse-distance weighting
-clf.add(features: Vec<Trit>, label: f64);
-clf.fit(samples: &[(Vec<Trit>, f64)]);
-clf.predict(query: &[Trit]) -> Result<f64, String>
+let pt = DataPoint::new(vec![1, 0, -1], 7);
+let dataset = TernaryDataset::new(vec![pt]).unwrap(); // Err on empty / dim mismatch / invalid trit
+dataset.len();       // usize
+dataset.is_empty();  // bool
 ```
 
-### KnnRegressor
+### `KNNClassifier`
 
 ```rust
-let mut reg = KnnRegressor::new(k: usize);
-reg.add(features: Vec<Trit>, label: f64);
-reg.predict(query: &[Trit]) -> Result<f64, String>
+let mut knn = KNNClassifier::new(3);          // panics if k == 0
+knn.fit(dataset);                              // consumes the dataset
+knn.predict(&[1, 0, -1])?            -> Result<i32, String>;
+knn.predict_batch(&[vec![1, 0, -1]])? -> Result<Vec<i32>, String>;
+knn.accuracy(&test_dataset)?         -> Result<f64, String>;
 ```
 
-### BallTree
+`predict` returns an error when the classifier is unfitted, the query contains an
+invalid trit, or the query dimension differs from the dataset.
+
+## Example: distance by hand
 
 ```rust
-let tree = BallTree::build(data: Vec<Vec<Trit>>) -> Result<BallTree, String>;
-tree.query(query: &[Trit], k: usize) -> Result<Vec<(usize, f64)>, String>
-// Returns (index, distance) pairs sorted ascending
+use ternary_knn::{trit_distance, normalized_trit_distance};
+
+// [1,0,-1] vs [-1,0,1]:
+//   pos 0: +1 vs -1  -> 2   (opposition)
+//   pos 1:  0 vs  0  -> 0   (agreement)
+//   pos 2: -1 vs +1  -> 2   (opposition)
+// raw = 4
+assert_eq!(trit_distance(&[1, 0, -1], &[-1, 0, 1]).unwrap(), 4.0);
+// normalized = 4 / (2 * 3) = 0.6666...
+assert_eq!(normalized_trit_distance(&[1, 0, -1], &[-1, 0, 1]).unwrap(), 4.0 / 6.0);
 ```
-
-### Brute Force Baseline
-
-```rust
-fn brute_force_knn(data: &[Vec<Trit>], query: &[Trit], k: usize) -> Result<Vec<(usize, f64)>, String>
-```
-
-## Real-world example
-
-A fishing boat runs a ternary neural network that classifies sonar returns as {-1: empty water, 0: uncertain, +1: fish school}. The network's final layer outputs a 64-dimensional ternary vector per ping. With 50,000 labeled pings in the database, brute-force KNN takes O(50K × 64) per query — about 3.2M comparisons per classification.
-
-A ball tree with leaf size 8 cuts this to O(64 × log 50K) ≈ 1,000 comparisons on average. At 20 pings per second, you go from 64M ops/sec (barely fits on the embedded CPU) to 20K ops/sec (trivial, with power to spare for the sonar DSP).
-
-## Ecosystem connections
-
-- **[`ternary-quantize`](https://github.com/SuperInstance/ternary-quantize)** — produces the ternary vectors this crate classifies
-- **[`ternary-transformer`](https://github.com/SuperInstance/ternary-transformer)** — transformer outputs feed directly into KNN search
-- **[`ternary-svm`](https://github.com/SuperInstance/ternary-svm)** — alternative classifier for the same ternary feature space
-- **[`ternary-hmm`](https://github.com/SuperInstance/ternary-hmm)** — models temporal sequences of ternary observations
 
 ## Performance
 
-| Operation | Complexity | When to use |
-|-----------|-----------|-------------|
-| `trit_distance(a, b)` | O(d) | Single pair comparison |
-| `brute_force_knn` | O(n·d) per query | n < 100, correctness baseline |
-| `BallTree::build` | O(n·d·log n) | One-time cost |
-| `BallTree::query` | O(d·log n) avg, O(n·d) worst | n > 100, production queries |
+| Operation | Complexity |
+|-----------|-----------|
+| `trit_distance(a, b)` | O(d) — single pair |
+| `validate_ternary(v)` | O(d) |
+| `KNNClassifier::predict` | O(n·d + n·log n) brute force per query |
 
-Memory: O(n·d) for the ball tree. Each node stores a ternary centroid and radius — the overhead is ~2× the raw data.
+Memory: O(n·d) — the classifier stores the training set as-is (no auxiliary index).
 
-## Open questions
+## Ecosystem connections
 
-- **Curse of dimensionality**: Ball trees degrade above ~50 dimensions. For 64-d ternary vectors, is the pruning still effective, or do we need LSH?
-- **Metric properties**: Trit distance is a proper metric (triangle inequality holds). Can we exploit this for exact pruning guarantees?
-- **Batched queries**: Processing 100 queries at once could share traversal work. The current API is one-query-at-a-time.
-- **Trit packing**: Storing 16 trits per u32 (2 bits each) would cut cache pressure by 8× for large datasets.
+- **[`ternary-types`](https://github.com/SuperInstance/ternary-types)** — shared trit type this crate depends on
+- **[`ternary-quantize`](https://github.com/SuperInstance/ternary-quantize)** — produces the ternary vectors this crate classifies
+- **[`ternary-transformer`](https://github.com/SuperInstance/ternary-transformer)** — transformer outputs feed directly into KNN search
+- **[`ternary-svm`](https://github.com/SuperInstance/ternary-svm)** — alternative classifier for the same ternary feature space
 
 ## Testing
 
 ```bash
 cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
-15 tests: exact match (distance 0), opposite vectors (distance 2d), mixed distances, weighted distance, validation, KNN classification with k=1/k=5, tie-breaking (smallest label wins), weighted voting, regression accuracy, ball tree ↔ brute force consistency, edge cases (single point, k=n), dimension mismatch errors.
+16 unit tests covering: exact-match distance (0), fully-opposed vectors (2 per
+dimension), mixed zero/nonzero mismatches, non-trivial normalized distance,
+invalid-trit rejection, dataset construction errors (empty / dimension mismatch),
+k=1 accuracy, k=3 majority vote, `k` larger than the dataset (clamping), a voting
+tie resolved by the smallest label, all-identical points, query dimension mismatch
+(clean error), and predicting before fitting.
 
 ## License
 

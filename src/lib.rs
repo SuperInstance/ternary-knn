@@ -1,8 +1,8 @@
 //! # ternary-knn
 //!
-//! K-nearest neighbors classification and regression for ternary vectors
-//! (elements in {-1, 0, +1}), with ternary-specific distance metrics and
-//! both brute-force and ball-tree index strategies.
+//! K-nearest neighbors **classification** for ternary vectors
+//! (elements in {-1, 0, +1}), using a ternary-specific distance metric and
+//! brute-force neighbor search.
 //!
 //! Connected to the [`ternary-types`](https://github.com/SuperInstance/ternary-types)
 //! fleet via its dependency — use `ternary_types::Ternary` for cross-crate interop.
