@@ -140,7 +140,9 @@ impl KNNClassifier {
             .map(|p| (trit_distance(&p.features, point).unwrap(), p.label))
             .collect();
 
-        distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        // Use `total_cmp` (not `partial_cmp().unwrap()`) so the sort can never
+        // panic on a NaN distance, even if a future metric returns one.
+        distances.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         let k_nearest = &distances[..self.k.min(distances.len())];
         let mut votes: HashMap<i32, usize> = HashMap::new();
