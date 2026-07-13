@@ -130,6 +130,12 @@ impl KNNClassifier {
     }
 
     /// Predict label for a single point.
+    ///
+    /// Returns the majority label among the `k` nearest neighbors (by trit
+    /// distance). On a **voting tie** (two labels with equal vote counts), the
+    /// **smallest label wins**, making the result deterministic regardless of
+    /// map iteration order. Distance ties are broken by dataset order (stable
+    /// sort). `k` larger than the dataset is clamped to the dataset size.
     pub fn predict(&self, point: &[Trit]) -> Result<i32, String> {
         let data = self.data.as_ref().ok_or("KNN not fitted yet")?;
         validate_ternary(point)?;
@@ -162,11 +168,18 @@ impl KNNClassifier {
             *votes.entry(label).or_insert(0) += 1;
         }
 
-        votes
+        // Majority vote. Pick the highest count, then break ties by choosing
+        // the smallest label so the result is deterministic regardless of
+        // HashMap iteration order.
+        let best_count = votes.values().copied().max().unwrap_or(0);
+        let winner = votes
             .into_iter()
-            .max_by_key(|&(_, count)| count)
+            .filter(|&(_, count)| count == best_count)
             .map(|(label, _)| label)
-            .ok_or("No predictions available".into())
+            .min()
+            .ok_or_else(|| "No predictions available".to_string())?;
+
+        Ok(winner)
     }
 
     /// Predict labels for multiple points.
