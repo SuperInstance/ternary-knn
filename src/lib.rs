@@ -134,11 +134,23 @@ impl KNNClassifier {
         let data = self.data.as_ref().ok_or("KNN not fitted yet")?;
         validate_ternary(point)?;
 
+        // Validate the query dimension up front so a bad-length query returns a
+        // clean error instead of panicking inside `trit_distance(...).unwrap()`.
+        if point.len() != data.dim {
+            return Err(format!(
+                "Dimension mismatch: query has {} dims but dataset has {}",
+                point.len(),
+                data.dim
+            ));
+        }
+
+        // Dimensions are now guaranteed equal, but propagate any error rather
+        // than `.unwrap()` so the code is robust to metric changes.
         let mut distances: Vec<(f64, i32)> = data
             .points
             .iter()
-            .map(|p| (trit_distance(&p.features, point).unwrap(), p.label))
-            .collect();
+            .map(|p| Ok((trit_distance(&p.features, point)?, p.label)))
+            .collect::<Result<Vec<_>, String>>()?;
 
         // Use `total_cmp` (not `partial_cmp().unwrap()`) so the sort can never
         // panic on a NaN distance, even if a future metric returns one.
